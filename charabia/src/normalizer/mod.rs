@@ -23,7 +23,7 @@ pub use self::turkish::TurkishNormalizer;
 #[cfg(feature = "vietnamese")]
 pub use self::vietnamese::VietnameseNormalizer;
 use crate::segmenter::SegmentedTokenIter;
-use crate::Token;
+use crate::{Language, Token};
 
 mod arabic;
 #[cfg(feature = "chinese-normalization")]
@@ -85,7 +85,66 @@ pub(crate) const DEFAULT_NORMALIZER_OPTION: NormalizerOption = NormalizerOption 
     create_char_map: false,
     lossy: true,
     classifier: ClassifierOption { stop_words: None, separators: None },
+    lemmatizer: None,
 };
+
+/// Trait for reducing a word to its lemma.
+///
+/// Charabia ships no lemmatiser of its own: a caller that has a dictionary
+/// plugs it in through [`NormalizerOption::lemmatizer`], and the same step then
+/// applies while indexing and while parsing a query.
+pub trait Lemmatizer: Sync + Send + std::fmt::Debug {
+    /// The lemma of `word`, or `None` when the lemmatiser has nothing to say
+    /// about it — an unknown word, or a language it holds no dictionary for.
+    ///
+    /// `sentence_initial` tells that the word opens a sentence, which is what
+    /// separates a capitalised ordinary word from a proper noun.
+    fn lemma<'o>(
+        &self,
+        word: &'o str,
+        language: Option<Language>,
+        sentence_initial: bool,
+    ) -> Option<Cow<'o, str>>;
+}
+
+/// Replaces the token lemma, keeping `char_map` aligned with the original text.
+///
+/// The map keeps one entry per original character, because the highlighter
+/// counts entries to know how many characters a match spans; the bytes of the
+/// lemma all go to the last entry, so a match on the lemma opens back into the
+/// whole original word.
+fn lemmatize<'o>(
+    lemmatizer: &dyn Lemmatizer,
+    mut token: Token<'o>,
+    create_char_map: bool,
+) -> Token<'o> {
+    let sentence_initial = token.byte_start == 0;
+    let Some(lemma) = lemmatizer.lemma(token.lemma(), token.language, sentence_initial) else {
+        return token;
+    };
+    if lemma.as_ref() == token.lemma() {
+        return token;
+    }
+    let lemma = lemma.into_owned();
+
+    if create_char_map {
+        if lemma.len() > u8::MAX as usize {
+            return token;
+        }
+        let mut char_map: Vec<(u8, u8)> = match token.char_map.take() {
+            Some(map) => map.into_iter().map(|(origin, _)| (origin, 0)).collect(),
+            None => token.lemma().chars().map(|c| (c.len_utf8() as u8, 0)).collect(),
+        };
+        match char_map.last_mut() {
+            Some(last) => last.1 = lemma.len() as u8,
+            None => return token,
+        }
+        token.char_map = Some(char_map);
+    }
+
+    token.lemma = Cow::Owned(lemma);
+    token
+}
 
 /// Iterator over Normalized [`Token`]s.
 pub struct NormalizedTokenIter<'o, 'aho, 'lang, 'tb> {
@@ -107,6 +166,7 @@ pub struct NormalizerOption<'tb> {
     pub create_char_map: bool,
     pub classifier: ClassifierOption<'tb>,
     pub lossy: bool,
+    pub lemmatizer: Option<&'tb dyn Lemmatizer>,
 }
 
 /// Trait defining a normalizer.
@@ -269,6 +329,14 @@ impl Normalize for Token<'_> {
             }
         }
 
+        // Between the classifier, which still sees the surface form, and
+        // lowercasing, which would take the casing away from the dictionary.
+        if let Some(lemmatizer) = options.lemmatizer {
+            if self.is_word() {
+                self = lemmatize(lemmatizer, self, options.create_char_map);
+            }
+        }
+
         if options.lossy {
             for normalizer in LOSSY_NORMALIZERS.iter() {
                 if normalizer.should_normalize(&self) {
@@ -321,6 +389,7 @@ mod test {
                 create_char_map: true,
                 lossy: true,
                 classifier: crate::normalizer::ClassifierOption { stop_words: None, separators: None },
+                lemmatizer: None,
             };
 
             #[test]
@@ -374,7 +443,8 @@ Make sure that normalized tokens are valid or change the trigger condition of th
                     classifier:  crate::normalizer::ClassifierOption {
                         stop_words: Some(stop_words),
                         separators: Some(separators.as_slice()),
-                    }
+                    },
+                    lemmatizer: None,
                 };
 
                 let normalized_token = token.normalize(&normalizer_option);

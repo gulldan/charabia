@@ -4,7 +4,7 @@ use aho_corasick::{AhoCorasick, MatchKind};
 use fst::Set;
 
 use crate::detection::Language;
-use crate::normalizer::{NormalizedTokenIter, NormalizerOption};
+use crate::normalizer::{Lemmatizer, NormalizedTokenIter, NormalizerOption};
 use crate::segmenter::{Segment, SegmentedStrIter, SegmentedTokenIter, SegmenterOption};
 use crate::separators::DEFAULT_SEPARATORS;
 use crate::Token;
@@ -324,6 +324,21 @@ impl<'tb, A: AsRef<[u8]>> TokenizerBuilder<'tb, A> {
     /// * `lossy` - a `bool` that enable or disable the lossy normalization.
     pub fn lossy_normalization(&mut self, lossy: bool) -> &mut Self {
         self.normalizer_option.lossy = lossy;
+        self
+    }
+
+    /// Reduce words to their lemma with the provided [`Lemmatizer`].
+    ///
+    /// Charabia has no dictionary of its own, so lemmatization only happens
+    /// when a caller provides one. The lemmatizer needs the language of the
+    /// token, which for most scripts means that [`TokenizerBuilder::allow_list`]
+    /// has to be set as well.
+    ///
+    /// # Arguments
+    ///
+    /// * `lemmatizer` - the lemmatizer to apply to every word.
+    pub fn lemmatizer(&mut self, lemmatizer: &'tb dyn Lemmatizer) -> &mut Self {
+        self.normalizer_option.lemmatizer = Some(lemmatizer);
         self
     }
 

@@ -175,6 +175,7 @@ mod test {
             create_char_map: true,
             classifier: ClassifierOption { stop_words: Some(stop_words), separators: None },
             lossy: false,
+            ..Default::default()
         };
 
         let token = Classifier
@@ -212,6 +213,7 @@ mod test {
             create_char_map,
             classifier: ClassifierOption { stop_words: Some(stop_words), separators: None },
             lossy,
+            ..Default::default()
         };
 
         let token = Classifier
@@ -237,6 +239,7 @@ mod test {
             create_char_map,
             classifier: ClassifierOption { stop_words: None, separators: Some(&separators) },
             lossy,
+            ..Default::default()
         };
 
         let token = Classifier
@@ -267,6 +270,7 @@ mod test {
                 separators: Some(&separators),
             },
             lossy,
+            ..Default::default()
         };
 
         let token = Classifier
