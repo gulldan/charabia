@@ -198,7 +198,14 @@ impl<'o> Iterator for SegmentedStrIter<'o, '_, '_> {
                     let mut detector = text.detect(self.allow_list);
                     self.segmenter = segmenter(&mut detector);
                     self.script = detector.script();
-                    self.language = detector.language;
+                    // udlex: с явным allow_list язык обязан доехать до
+                    // токена — иначе лемматизатор не знает, каким
+                    // словарём отвечать.
+                    self.language = if self.allow_list.is_some() {
+                        detector.language()
+                    } else {
+                        detector.language
+                    };
                     self.aho_iter = Some(AhoSegmentedStrIter::new(
                         text,
                         self.aho.unwrap_or(&DEFAULT_SEPARATOR_AHO),
