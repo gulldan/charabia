@@ -7,10 +7,16 @@ use serde::{Deserialize, Serialize};
 use super::chars;
 
 macro_rules! make_language {
-    ($($language:tt), +) => {
+    (
+        $($language:tt), + ;
+        // Языки вне списка whatlang: определить их нельзя, они доступны только
+        // через явно заданный список локалей.
+        $($undetected:tt => $undetected_code:literal), + $(,)?
+    ) => {
         #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize, PartialOrd, Ord)]
         pub enum Language {
             Zho,
+            $($undetected),+,
             $($language),+,
         }
         impl From<whatlang::Lang> for Language {
@@ -21,19 +27,20 @@ macro_rules! make_language {
             }
         }
 
-        impl From<Language> for whatlang::Lang {
-            fn from(other: Language) -> whatlang::Lang {
-                match other {
-                    Language::Zho => whatlang::Lang::Cmn,
-                    $(Language::$language => whatlang::Lang::$language), +,
+        impl Language {
+            /// Соответствие в whatlang, если оно есть.
+            pub fn whatlang(self) -> Option<whatlang::Lang> {
+                match self {
+                    Language::Zho => Some(whatlang::Lang::Cmn),
+                    $(Language::$undetected => None), +,
+                    $(Language::$language => Some(whatlang::Lang::$language)), +,
                 }
             }
-        }
 
-        impl Language {
             pub fn code(&self) -> &'static str {
                 match self {
                     Language::Zho => "zho",
+                    $(Language::$undetected => $undetected_code), +,
                     $(Language::$language => whatlang::Lang::$language.code()), +,
                 }
             }
@@ -41,6 +48,7 @@ macro_rules! make_language {
             pub fn from_code<S: AsRef<str>>(code: S) -> Option<Language> {
                 match code.as_ref() {
                     "zho" => Some(Language::Zho),
+                    $($undetected_code => Some(Language::$undetected)), +,
                     _ => whatlang::Lang::from_code(code.as_ref()).map(Language::from),
                 }
             }
@@ -118,7 +126,117 @@ make_language! {
     Cat,
     Tgl,
     Hye,
-    Cym
+    Cym;
+    Kaz => "kaz",
+    Abk => "abk",
+    Abq => "abq",
+    Aii => "aii",
+    Ajp => "ajp",
+    Akk => "akk",
+    Aln => "aln",
+    Apu => "apu",
+    Aqz => "aqz",
+    Arb => "arb",
+    Arh => "arh",
+    Arr => "arr",
+    Axm => "axm",
+    Azz => "azz",
+    Bam => "bam",
+    Bho => "bho",
+    Bor => "bor",
+    Bre => "bre",
+    Brh => "brh",
+    Bxr => "bxr",
+    Ceb => "ceb",
+    Chu => "chu",
+    Cop => "cop",
+    Cpg => "cpg",
+    Ctn => "ctn",
+    Egy => "egy",
+    Eme => "eme",
+    Ess => "ess",
+    Eus => "eus",
+    Fao => "fao",
+    Frm => "frm",
+    Fro => "fro",
+    Gla => "gla",
+    Gle => "gle",
+    Glg => "glg",
+    Glv => "glv",
+    Got => "got",
+    Grc => "grc",
+    Gub => "gub",
+    Gun => "gun",
+    Gwi => "gwi",
+    Gya => "gya",
+    Hat => "hat",
+    Hau => "hau",
+    Hbo => "hbo",
+    Hit => "hit",
+    Hsb => "hsb",
+    Hyw => "hyw",
+    Isl => "isl",
+    Kbc => "kbc",
+    Kir => "kir",
+    Kmr => "kmr",
+    Koi => "koi",
+    Kpv => "kpv",
+    Krl => "krl",
+    Lij => "lij",
+    Lzh => "lzh",
+    Mdf => "mdf",
+    Myu => "myu",
+    Myv => "myv",
+    Naq => "naq",
+    Nds => "nds",
+    Nhi => "nhi",
+    Nmf => "nmf",
+    Nor => "nor",
+    Oci => "oci",
+    Oge => "oge",
+    Olo => "olo",
+    Orv => "orv",
+    Ota => "ota",
+    Pay => "pay",
+    Pcm => "pcm",
+    Pro => "pro",
+    Pst => "pst",
+    Qaf => "qaf",
+    Qpm => "qpm",
+    Qtd => "qtd",
+    Qti => "qti",
+    Quc => "quc",
+    Ruc => "ruc",
+    Sab => "sab",
+    Sah => "sah",
+    San => "san",
+    Say => "say",
+    Scn => "scn",
+    Sga => "sga",
+    Sjo => "sjo",
+    Sme => "sme",
+    Sms => "sms",
+    Snd => "snd",
+    Sqi => "sqi",
+    Ssp => "ssp",
+    Tat => "tat",
+    Tpn => "tpn",
+    Uig => "uig",
+    Urb => "urb",
+    Vep => "vep",
+    Wbp => "wbp",
+    Wol => "wol",
+    Wuu => "wuu",
+    Xav => "xav",
+    Xcl => "xcl",
+    Xnr => "xnr",
+    Xpg => "xpg",
+    Xum => "xum",
+    Yor => "yor",
+    Yrk => "yrk",
+    Yrl => "yrl",
+    Yue => "yue",
+    Zza => "zza"
 }
 
 macro_rules! make_script {
