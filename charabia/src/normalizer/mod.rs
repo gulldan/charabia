@@ -151,6 +151,18 @@ fn lemmatize<'o>(mut token: Token<'o>, options: &NormalizerOption) -> Token<'o> 
     }
 
     token.lemma = Cow::Owned(lemma);
+
+    // Лемма приходит из словаря готовой строкой и потому не прошла шаги, через
+    // которые уже прошёл сам токен. Без повторного разложения диакритика в ней
+    // остаётся слитным символом, лоссовые нормализаторы её не снимают, и слово
+    // перестаёт находиться без надстрочных знаков: `Häusern` лемматизируется в
+    // `Haus`, а `hauser` его больше не находит, хотя в стоке находит.
+    for normalizer in NORMALIZERS.iter() {
+        if normalizer.should_normalize(&token) {
+            token = normalizer.normalize(token, options);
+        }
+    }
+
     // Слово стало другим — про эту строку стоп-лист ещё не спрашивали.
     classify_lemma(token, options)
 }
