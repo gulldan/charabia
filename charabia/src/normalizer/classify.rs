@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 
 use fst::Set;
 
-use super::{Normalizer, NormalizerOption};
+use super::{Normalize, Normalizer, NormalizerOption};
 use crate::{SeparatorKind, Token, TokenKind};
 
 /// Classify a Token as a word, a stop_word or a separator.
@@ -45,6 +45,45 @@ impl Normalizer for Classifier {
     fn should_normalize(&self, token: &Token) -> bool {
         token.kind == TokenKind::Unknown
     }
+}
+
+/// Нормализация, в которой хранится стоп-лист: только нелоссовые нормализаторы —
+/// ровно то, через что вызывающая сторона проводит стоп-слово перед записью.
+/// Регистр она не трогает, так что сравнение остаётся ровно настолько
+/// регистрозависимым, насколько им был сам классификатор.
+const STOP_WORD_NORMALIZER_OPTION: NormalizerOption = NormalizerOption {
+    create_char_map: false,
+    lossy: false,
+    classifier: ClassifierOption { stop_words: None, separators: None },
+    lemmatizer: None,
+};
+
+/// Помечает токен стоп-словом, если стоп-словом оказалась его лемма.
+///
+/// [`Classifier`] работает до лемматизации и видит только словоформу — так
+/// продолжают работать стоп-слова, записанные словоформой. Стоп-лист,
+/// записанный леммами (для языка с богатой морфологией это самый естественный
+/// способ его написать), виден только отсюда.
+///
+/// Лемма сравнивается в том же виде, в каком лежит стоп-лист: словарь отвечает
+/// в своей форме композиции, а стоп-слово записано нелоссово нормализованным,
+/// поэтому обе стороны проходят одни и те же нормализаторы. Регистр не
+/// приводится ни с одной стороны: словарь отдаёт лемму в своём регистре, и
+/// именно он должен сойтись с тем, что написали в настройке.
+pub(super) fn classify_lemma<'o>(mut token: Token<'o>, options: &NormalizerOption) -> Token<'o> {
+    let Some(stop_words) = &options.classifier.stop_words else {
+        return token;
+    };
+
+    let is_stop_word = {
+        let lemma = token.lemma().normalize(&STOP_WORD_NORMALIZER_OPTION);
+        stop_words.contains(lemma.as_ref())
+    };
+    if is_stop_word {
+        token.kind = TokenKind::StopWord;
+    }
+
+    token
 }
 
 /// Structure for providing options to the classfier.
@@ -189,6 +228,94 @@ mod test {
         let token = Classifier
             .normalize(Token { lemma: Cow::Borrowed("foobar"), ..Default::default() }, &options);
         assert!(token.is_word());
+    }
+
+    /// Словарь на несколько слов: чтобы проверить стоп-лист, лемматизатору
+    /// хватает пары ответов, зато они разобраны руками.
+    ///
+    /// Финская пара отвечает в NFC, тогда как токен доезжает сюда разложенным
+    /// нормализатором совместимости — ровно так ведёт себя udlex.
+    #[derive(Debug)]
+    struct Dictionary;
+
+    impl crate::normalizer::Lemmatizer for Dictionary {
+        fn lemma<'o>(
+            &self,
+            word: &'o str,
+            _language: Option<crate::Language>,
+            _sentence_initial: bool,
+        ) -> Option<Cow<'o, str>> {
+            match word {
+                "мыла" | "Мыла" | "мыл" => Some(Cow::Borrowed("мыть")),
+                "etta\u{308}" => Some(Cow::Borrowed("että")),
+                _ => None,
+            }
+        }
+    }
+
+    /// Стоп-лист в том виде, в каком его кладёт Meilisearch: нелоссовая
+    /// нормализация, без приведения к нижнему регистру.
+    fn stop_word_set(words: &[&str]) -> Vec<u8> {
+        let mut normalized: Vec<String> = words
+            .iter()
+            .map(|word| word.normalize(&NormalizerOption::default()).into_owned())
+            .collect();
+        normalized.sort();
+        Set::from_iter(normalized).unwrap().as_fst().as_bytes().to_vec()
+    }
+
+    /// Токен, прошедший весь конвейер вместе со словарём.
+    fn lemmatized<'o>(text: &'o str, stop_words: &[u8]) -> Token<'o> {
+        let options = NormalizerOption {
+            create_char_map: true,
+            lossy: true,
+            classifier: ClassifierOption {
+                stop_words: Some(Set::new(stop_words).unwrap()),
+                separators: None,
+            },
+            lemmatizer: Some(&Dictionary),
+        };
+
+        Token { lemma: Cow::Borrowed(text), ..Default::default() }.normalize(&options)
+    }
+
+    #[test]
+    fn stop_word_written_as_a_lemma_catches_every_word_form() {
+        let stop_words = stop_word_set(&["мыть"]);
+
+        // Словоформа, лемма которой объявлена стоп-словом.
+        assert!(lemmatized("мыла", &stop_words).is_stopword());
+        // Она же с заглавной: словарь отдаёт лемму в нижнем регистре, так что
+        // сравнение сходится с тем, что написали в настройке.
+        assert!(lemmatized("Мыла", &stop_words).is_stopword());
+        // Сама лемма — её ловит ещё классификатор, до словаря.
+        assert!(lemmatized("мыть", &stop_words).is_stopword());
+        // Слово, которого словарь не знает, стоп-словом не становится.
+        assert!(lemmatized("раму", &stop_words).is_word());
+    }
+
+    #[test]
+    fn stop_word_written_as_a_word_form_keeps_working() {
+        let stop_words = stop_word_set(&["мыла"]);
+
+        // Ровно та словоформа, что записана: её разбирает классификатор, как
+        // и в стоке, — до словаря дело не доходит.
+        assert!(lemmatized("мыла", &stop_words).is_stopword());
+        // Другая словоформа того же слова стоп-словом не объявлена, и её лемма
+        // в списке не лежит.
+        let token = lemmatized("мыл", &stop_words);
+        assert!(token.is_word());
+        assert_eq!(token.lemma(), "мыть");
+    }
+
+    #[test]
+    fn lemma_and_stop_word_are_compared_in_the_same_composition_form() {
+        // Стоп-слово хранится разложенным, словарь отвечает составленным —
+        // сойтись они обязаны всё равно.
+        let stop_words = stop_word_set(&["että"]);
+
+        assert!(lemmatized("että", &stop_words).is_stopword());
+        assert!(lemmatized("etta\u{308}", &stop_words).is_stopword());
     }
 
     #[quickcheck]

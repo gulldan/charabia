@@ -5,6 +5,7 @@ pub use self::ae_oe_normalizer::AeOeNormalizer;
 pub use self::arabic::ArabicNormalizer;
 #[cfg(feature = "chinese-normalization")]
 pub use self::chinese::ChineseNormalizer;
+use self::classify::classify_lemma;
 pub use self::classify::{Classifier, ClassifierOption};
 pub use self::compatibility_decomposition::CompatibilityDecompositionNormalizer;
 pub use self::control_char::ControlCharNormalizer;
@@ -113,11 +114,18 @@ pub trait Lemmatizer: Sync + Send + std::fmt::Debug {
 /// counts entries to know how many characters a match spans; the bytes of the
 /// lemma all go to the last entry, so a match on the lemma opens back into the
 /// whole original word.
-fn lemmatize<'o>(
-    lemmatizer: &dyn Lemmatizer,
-    mut token: Token<'o>,
-    create_char_map: bool,
-) -> Token<'o> {
+///
+/// Получившаяся лемма ещё раз сверяется со стоп-листом: классификатор видел
+/// только словоформу.
+fn lemmatize<'o>(mut token: Token<'o>, options: &NormalizerOption) -> Token<'o> {
+    let Some(lemmatizer) = options.lemmatizer else {
+        return token;
+    };
+    // Стоп-слова и разделители классификатор уже разобрал по поверхностной
+    // форме, словарю их показывать незачем.
+    if !token.is_word() {
+        return token;
+    }
     let sentence_initial = token.byte_start == 0;
     let Some(lemma) = lemmatizer.lemma(token.lemma(), token.language, sentence_initial) else {
         return token;
@@ -127,7 +135,7 @@ fn lemmatize<'o>(
     }
     let lemma = lemma.into_owned();
 
-    if create_char_map {
+    if options.create_char_map {
         if lemma.len() > u8::MAX as usize {
             return token;
         }
@@ -143,7 +151,8 @@ fn lemmatize<'o>(
     }
 
     token.lemma = Cow::Owned(lemma);
-    token
+    // Слово стало другим — про эту строку стоп-лист ещё не спрашивали.
+    classify_lemma(token, options)
 }
 
 /// Iterator over Normalized [`Token`]s.
@@ -331,11 +340,7 @@ impl Normalize for Token<'_> {
 
         // Between the classifier, which still sees the surface form, and
         // lowercasing, which would take the casing away from the dictionary.
-        if let Some(lemmatizer) = options.lemmatizer {
-            if self.is_word() {
-                self = lemmatize(lemmatizer, self, options.create_char_map);
-            }
-        }
+        self = lemmatize(self, options);
 
         if options.lossy {
             for normalizer in LOSSY_NORMALIZERS.iter() {
@@ -358,6 +363,10 @@ impl<'o> Normalize for &'o str {
         for normalizer in NORMALIZERS.iter() {
             normalized = normalizer.normalize(normalized, options);
         }
+
+        // Тот же шаг, что и у токена: два пути нормализации не должны
+        // расходиться.
+        normalized = lemmatize(normalized, options);
 
         if options.lossy {
             for normalizer in LOSSY_NORMALIZERS.iter() {
