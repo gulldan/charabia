@@ -51,7 +51,21 @@ impl<'o, 'al> StrDetection<'o, 'al> {
             .map(Detector::with_allowlist)
             .unwrap_or_default();
 
-        detector.detect_lang(text).map(Language::from)
+        let detected = detector.detect_lang(text)?;
+        // За одним профилем whatlang может стоять не один наш язык: нюнорск
+        // опознаётся профилем букмола. Ответ возвращается в тот список, из
+        // которого выбирали, иначе названная локаль подменялась бы соседней, у
+        // которой ни словаря, ни отношения к тексту. Наименьший из подошедших —
+        // чтобы ответ не зависел от порядка списка.
+        match allow_list {
+            Some(allow_list) => allow_list
+                .iter()
+                .copied()
+                .filter(|language| language.whatlang() == Some(detected))
+                .min()
+                .or_else(|| Some(Language::from(detected))),
+            None => Some(Language::from(detected)),
+        }
     }
 }
 

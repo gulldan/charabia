@@ -9,6 +9,9 @@ use super::chars;
 macro_rules! make_language {
     (
         $($language:tt), + ;
+        // Свой код, чужой профиль: самого языка в whatlang нет, но есть
+        // достаточно близкий, чтобы по тексту определялся через него.
+        $($aliased:tt => $aliased_code:literal => $aliased_lang:tt), + ;
         // Языки вне списка whatlang: определить их нельзя, они доступны только
         // через явно заданный список локалей.
         $($undetected:tt => $undetected_code:literal), + $(,)?
@@ -19,7 +22,7 @@ macro_rules! make_language {
         /// порядок один и тот же при индексации и на запросе.
         #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize, PartialOrd, Ord)]
         pub enum Language {
-            Zho,
+            $($aliased),+,
             $($undetected),+,
             $($language),+,
         }
@@ -35,7 +38,7 @@ macro_rules! make_language {
             /// Соответствие в whatlang, если оно есть.
             pub fn whatlang(self) -> Option<whatlang::Lang> {
                 match self {
-                    Language::Zho => Some(whatlang::Lang::Cmn),
+                    $(Language::$aliased => Some(whatlang::Lang::$aliased_lang)), +,
                     $(Language::$undetected => None), +,
                     $(Language::$language => Some(whatlang::Lang::$language)), +,
                 }
@@ -43,7 +46,7 @@ macro_rules! make_language {
 
             pub fn code(&self) -> &'static str {
                 match self {
-                    Language::Zho => "zho",
+                    $(Language::$aliased => $aliased_code), +,
                     $(Language::$undetected => $undetected_code), +,
                     $(Language::$language => whatlang::Lang::$language.code()), +,
                 }
@@ -51,7 +54,7 @@ macro_rules! make_language {
 
             pub fn from_code<S: AsRef<str>>(code: S) -> Option<Language> {
                 match code.as_ref() {
-                    "zho" => Some(Language::Zho),
+                    $($aliased_code => Some(Language::$aliased)), +,
                     $($undetected_code => Some(Language::$undetected)), +,
                     _ => whatlang::Lang::from_code(code.as_ref()).map(Language::from),
                 }
@@ -131,6 +134,13 @@ make_language! {
     Tgl,
     Hye,
     Cym;
+    Zho => "zho" => Cmn,
+    // Норвежский: в whatlang есть только букмол, и он же опознаёт нюнорск —
+    // словарь у нас собран по нюнорску. Без этой строки язык считался бы
+    // неопределимым, а пара «датский с норвежским» отдавала бы весь текст
+    // датскому: список для whatlang сжимался бы до одного языка, а с одним
+    // языком в списке он отвечает им на что угодно.
+    Nor => "nor" => Nob;
     Kaz => "kaz",
     Abk => "abk",
     Abq => "abq",
@@ -195,7 +205,6 @@ make_language! {
     Nds => "nds",
     Nhi => "nhi",
     Nmf => "nmf",
-    Nor => "nor",
     Oci => "oci",
     Oge => "oge",
     Olo => "olo",
@@ -488,6 +497,31 @@ mod test {
         assert_eq!(Language::from_code("jpn"), Some(Language::Jpn));
         assert_eq!(Language::Cmn.code(), "cmn");
         assert_eq!(Language::from_code("cmn"), Some(Language::Cmn));
+    }
+
+    #[test]
+    fn a_language_detected_under_another_name_comes_back_as_the_one_asked_for() {
+        // За одним профилем whatlang стоит не один наш язык. Названный в списке
+        // и должен быть в ответе: иначе локаль подменяется соседней, у которой
+        // ни словаря, ни отношения к тексту.
+        assert_eq!(Language::Zho.whatlang(), Some(whatlang::Lang::Cmn));
+        let mut detection = crate::detection::StrDetection::new(
+            "他在图书馆里读了一本关于历史的书",
+            Some(&[Language::Zho, Language::Eng]),
+        );
+        assert_eq!(detection.language(), Some(Language::Zho));
+    }
+
+    #[test]
+    fn norwegian_is_detectable_through_the_profile_whatlang_does_have() {
+        // Своего профиля у нюнорска нет, есть букмольский, и раньше из-за
+        // этого норвежский считался неопределимым наравне с казахским. Хуже
+        // того: в паре «датский с норвежским» список для whatlang сжимался до
+        // одного языка, а с одним языком в списке он отвечает им на любой
+        // текст, так что норвежскому не доставалось ничего.
+        assert_eq!(Language::Nor.code(), "nor");
+        assert_eq!(Language::from_code("nor"), Some(Language::Nor));
+        assert_eq!(Language::Nor.whatlang(), Some(whatlang::Lang::Nob));
     }
 
     #[test]
