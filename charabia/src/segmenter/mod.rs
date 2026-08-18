@@ -127,6 +127,13 @@ impl<'o> Iterator for SegmentedTokenIter<'o, '_, '_> {
     }
 }
 
+impl<'lang> SegmentedTokenIter<'_, '_, 'lang> {
+    /// Локали, которыми ограничили определение языка, если их задали.
+    pub(crate) fn allow_list(&self) -> Option<&'lang [Language]> {
+        self.inner.allow_list
+    }
+}
+
 impl<'o, 'aho, 'lang> From<SegmentedStrIter<'o, 'aho, 'lang>>
     for SegmentedTokenIter<'o, 'aho, 'lang>
 {

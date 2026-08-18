@@ -106,6 +106,31 @@ pub trait Lemmatizer: Sync + Send + std::fmt::Debug {
         language: Option<Language>,
         sentence_initial: bool,
     ) -> Option<Cow<'o, str>>;
+
+    /// Which of the candidate languages the word itself belongs to.
+    ///
+    /// Statistical detection reads a whole text and knows a fixed list of
+    /// languages; a dictionary reads one word and knows whatever it was built
+    /// for. So when several languages are allowed, the word is put to each of
+    /// them and the answer is one of those that hold it. `None` means none of
+    /// them does, and the language the detector guessed stands.
+    ///
+    /// Two rules make the answer usable. It must not depend on the order of
+    /// `candidates`, because indexing passes the locales of one field and a
+    /// query passes the locales of the whole index, and those lists agree on
+    /// what they contain and not on how it is arranged. And it must not depend
+    /// on the text around the word, because indexing sees a document and a
+    /// query sees a query. What is left is the word and the set, which is
+    /// exactly enough for a word to be stored and looked up as the same lemma.
+    fn resolve(
+        &self,
+        word: &str,
+        candidates: &[Language],
+        sentence_initial: bool,
+    ) -> Option<Language> {
+        let _ = (word, candidates, sentence_initial);
+        None
+    }
 }
 
 /// Replaces the token lemma, keeping `char_map` aligned with the original text.
@@ -117,7 +142,11 @@ pub trait Lemmatizer: Sync + Send + std::fmt::Debug {
 ///
 /// Получившаяся лемма ещё раз сверяется со стоп-листом: классификатор видел
 /// только словоформу.
-fn lemmatize<'o>(mut token: Token<'o>, options: &NormalizerOption) -> Token<'o> {
+fn lemmatize<'o>(
+    mut token: Token<'o>,
+    options: &NormalizerOption,
+    candidates: Option<&[Language]>,
+) -> Token<'o> {
     let Some(lemmatizer) = options.lemmatizer else {
         return token;
     };
@@ -127,6 +156,18 @@ fn lemmatize<'o>(mut token: Token<'o>, options: &NormalizerOption) -> Token<'o> 
         return token;
     }
     let sentence_initial = token.byte_start == 0;
+
+    // Определитель языка выбирал из своих 69 языков и по целому куску текста;
+    // словарь отвечает про это самое слово и знает ровно те языки, под которые
+    // собран. Поэтому при нескольких кандидатах язык слова называет словарь, а
+    // ответ детектора остаётся запасным. Кандидат один или его нет — спрашивать
+    // нечего, и путь остаётся тем же, что был.
+    if let Some(candidates) = candidates.filter(|list| list.len() > 1) {
+        if let Some(language) = lemmatizer.resolve(token.lemma(), candidates, sentence_initial) {
+            token.language = Some(language);
+        }
+    }
+
     let Some(lemma) = lemmatizer.lemma(token.lemma(), token.language, sentence_initial) else {
         return token;
     };
@@ -177,7 +218,11 @@ impl<'o> Iterator for NormalizedTokenIter<'o, '_, '_, '_> {
     type Item = Token<'o>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(self.token_iter.next()?.normalize(self.options))
+        // Список локалей живёт у сегментатора: его задают и построителем, и
+        // отдельным доводом [`crate::Tokenizer::tokenize_with_allow_list`], а
+        // индексация ходит как раз вторым путём.
+        let candidates = self.token_iter.allow_list();
+        Some(self.token_iter.next()?.normalize_among(self.options, candidates))
     }
 }
 
@@ -337,13 +382,17 @@ pub trait Normalize {
     fn normalize(self, options: &NormalizerOption) -> Self::Item;
 }
 
-impl Normalize for Token<'_> {
-    type Item = Self;
-
-    /// Normalize [`Token`] using all the compatible Normalizers.
+impl<'o> Token<'o> {
+    /// Normalize the token, letting the lemmatizer choose among `candidates`.
     ///
-    /// A Latin `Token` would not be normalized the same as a Chinese `Token`.
-    fn normalize(mut self, options: &NormalizerOption) -> Self::Item {
+    /// The languages are the ones the caller allowed. They only matter when
+    /// there is more than one of them: then the text alone cannot say which
+    /// one the word is in, and the dictionaries are asked instead.
+    pub(crate) fn normalize_among(
+        mut self,
+        options: &NormalizerOption,
+        candidates: Option<&[Language]>,
+    ) -> Self {
         for normalizer in NORMALIZERS.iter() {
             if normalizer.should_normalize(&self) {
                 self = normalizer.normalize(self, options);
@@ -352,7 +401,7 @@ impl Normalize for Token<'_> {
 
         // Between the classifier, which still sees the surface form, and
         // lowercasing, which would take the casing away from the dictionary.
-        self = lemmatize(self, options);
+        self = lemmatize(self, options, candidates);
 
         if options.lossy {
             for normalizer in LOSSY_NORMALIZERS.iter() {
@@ -363,6 +412,21 @@ impl Normalize for Token<'_> {
         }
 
         self
+    }
+}
+
+impl Normalize for Token<'_> {
+    type Item = Self;
+
+    /// Normalize [`Token`] using all the compatible Normalizers.
+    ///
+    /// A Latin `Token` would not be normalized the same as a Chinese `Token`.
+    ///
+    /// Нормализация одного токена в отрыве от текста не знает, какие локали
+    /// разрешил вызывающий, так что язык слова остаётся тем, что стоит на
+    /// токене.
+    fn normalize(self, options: &NormalizerOption) -> Self::Item {
+        self.normalize_among(options, None)
     }
 }
 
@@ -378,7 +442,7 @@ impl<'o> Normalize for &'o str {
 
         // Тот же шаг, что и у токена: два пути нормализации не должны
         // расходиться.
-        normalized = lemmatize(normalized, options);
+        normalized = lemmatize(normalized, options, None);
 
         if options.lossy {
             for normalizer in LOSSY_NORMALIZERS.iter() {

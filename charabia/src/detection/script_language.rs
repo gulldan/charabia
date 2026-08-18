@@ -13,6 +13,10 @@ macro_rules! make_language {
         // через явно заданный список локалей.
         $($undetected:tt => $undetected_code:literal), + $(,)?
     ) => {
+        /// Производный `Ord` — это ещё и порядок, которым разрешается спор,
+        /// когда слово знает не один словарь: Meilisearch уже собирает им
+        /// объединение локалей индекса, и важно не кто в нём первый, а что
+        /// порядок один и тот же при индексации и на запросе.
         #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize, PartialOrd, Ord)]
         pub enum Language {
             Zho,

@@ -332,7 +332,8 @@ impl<'tb, A: AsRef<[u8]>> TokenizerBuilder<'tb, A> {
     /// Charabia has no dictionary of its own, so lemmatization only happens
     /// when a caller provides one. The lemmatizer needs the language of the
     /// token, which for most scripts means that [`TokenizerBuilder::allow_list`]
-    /// has to be set as well.
+    /// has to be set as well — and when that list names more than one language,
+    /// the lemmatizer is the one asked which of them the word belongs to.
     ///
     /// # Arguments
     ///
@@ -410,10 +411,12 @@ impl Default for TokenizerBuilder<'_, Vec<u8>> {
 
 #[cfg(test)]
 mod test {
+    use std::borrow::Cow;
+
     use fst::Set;
     use quickcheck::quickcheck;
 
-    use crate::{Tokenize, TokenizerBuilder};
+    use crate::{Language, Tokenize, TokenizerBuilder};
 
     #[test]
     fn check_lifetimes() {
@@ -450,5 +453,131 @@ mod test {
         let text = text.as_str();
         let tokens: Vec<_> = text.tokenize().collect();
         tokens.len() <= text.len()
+    }
+
+    /// Словарь на два языка, где казахского whatlang не знает вовсе, а «мост»
+    /// знают оба и лемматизируют по-разному — на нём и видно, как разрешается
+    /// спор.
+    #[derive(Debug)]
+    struct TwoLanguages;
+
+    impl crate::normalizer::Lemmatizer for TwoLanguages {
+        fn lemma<'o>(
+            &self,
+            word: &'o str,
+            language: Option<Language>,
+            _sentence_initial: bool,
+        ) -> Option<Cow<'o, str>> {
+            match (language?, word) {
+                (Language::Rus, "книгами") => Some(Cow::Borrowed("книга")),
+                (Language::Rus, "мост") => Some(Cow::Borrowed("мост")),
+                (Language::Kaz, "кітаптарды") => Some(Cow::Borrowed("кітап")),
+                (Language::Kaz, "мост") => Some(Cow::Borrowed("көпір")),
+                _ => None,
+            }
+        }
+
+        /// Так же, как настоящий словарь: среди знающих побеждает наименьший
+        /// язык, поэтому порядок списка на ответ не влияет.
+        fn resolve(
+            &self,
+            word: &str,
+            candidates: &[Language],
+            sentence_initial: bool,
+        ) -> Option<Language> {
+            candidates
+                .iter()
+                .copied()
+                .filter(|language| self.lemma(word, Some(*language), sentence_initial).is_some())
+                .min()
+        }
+    }
+
+    /// Лемма и язык каждого слова текста при заданных локалях.
+    fn lemmatized(text: &str, allow_list: &[Language]) -> Vec<(String, Option<Language>)> {
+        let mut builder = TokenizerBuilder::default();
+        builder.lemmatizer(&TwoLanguages).allow_list(allow_list);
+        let tokenizer = builder.build();
+        tokenizer
+            .tokenize(text)
+            .filter(|token| token.is_word())
+            .map(|token| (token.lemma().to_string(), token.language))
+            .collect()
+    }
+
+    /// То же, но локали задаются на каждый вызов: так ходит индексация, у
+    /// которой на один построитель приходятся поля с разными локалями.
+    fn lemmatized_per_call(text: &str, allow_list: &[Language]) -> Vec<String> {
+        let mut builder = TokenizerBuilder::default();
+        builder.lemmatizer(&TwoLanguages);
+        let tokenizer = builder.build();
+        tokenizer
+            .tokenize_with_allow_list(text, Some(allow_list))
+            .filter(|token| token.is_word())
+            .map(|token| token.lemma().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn locales_given_per_call_choose_the_dictionary_too() {
+        assert_eq!(
+            lemmatized_per_call("кітаптарды книгами", &[Language::Rus, Language::Kaz]),
+            vec!["кітап".to_string(), "книга".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_second_locale_no_longer_costs_the_first_one_its_words() {
+        // Одна локаль: язык известен и без словаря.
+        assert_eq!(
+            lemmatized("кітаптарды", &[Language::Kaz]),
+            vec![("кітап".to_string(), Some(Language::Kaz))]
+        );
+
+        // Две локали, одну из которых whatlang не умеет определять. Раньше она
+        // просто выпадала из списка, и казахское слово разбирал русский
+        // словарь; теперь язык каждого слова называет тот словарь, который его
+        // знает.
+        for allow_list in [[Language::Rus, Language::Kaz], [Language::Kaz, Language::Rus]] {
+            assert_eq!(
+                lemmatized("кітаптарды книгами", &allow_list),
+                vec![
+                    ("кітап".to_string(), Some(Language::Kaz)),
+                    ("книга".to_string(), Some(Language::Rus)),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_word_two_dictionaries_know_lands_on_the_same_language_either_way() {
+        // «мост» знают оба словаря, и леммы у них разные. Побеждает меньший из
+        // языков — в любом порядке списка и потому одинаково при индексации,
+        // где список даёт поле, и на запросе, где его даёт весь индекс.
+        for allow_list in [[Language::Rus, Language::Kaz], [Language::Kaz, Language::Rus]] {
+            assert_eq!(
+                lemmatized("мост", &allow_list),
+                vec![("көпір".to_string(), Some(Language::Kaz))]
+            );
+        }
+
+        // Названа одна локаль — спрашивать нечего, отвечает она.
+        assert_eq!(
+            lemmatized("мост", &[Language::Rus]),
+            vec![("мост".to_string(), Some(Language::Rus))]
+        );
+    }
+
+    #[test]
+    fn without_locales_nothing_is_asked_of_the_dictionary() {
+        // Без allow_list латиница остаётся без языка, а кириллица получает то,
+        // что решил whatlang: словарь тут ни при чём, и вести себя это должно
+        // ровно как раньше.
+        let mut builder = TokenizerBuilder::default();
+        builder.lemmatizer(&TwoLanguages);
+        let tokenizer = builder.build();
+        let lemmas: Vec<_> =
+            tokenizer.tokenize("мост").map(|token| token.lemma().to_string()).collect();
+        assert_eq!(lemmas, vec!["мост".to_string()]);
     }
 }
