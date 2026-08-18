@@ -48,6 +48,13 @@ pub struct Token<'o> {
     /// kind of the Token assigned by the classifier
     pub kind: TokenKind,
     pub lemma: Cow<'o, str>,
+    /// Слово так, как оно написано в тексте, когда лемматизатор заменил лемму
+    /// на другую строку; `None`, когда заменять было нечего или некому.
+    ///
+    /// Обе формы проходят один и тот же конвейер нормализации, так что
+    /// сравнивать их можно напрямую: разойтись они могут только словарём, а не
+    /// раскладкой юникода или регистром.
+    pub surface: Option<Cow<'o, str>>,
     /// index of the first and the last character of the original lemma
     pub char_start: usize,
     pub char_end: usize,
@@ -67,6 +74,15 @@ impl Token<'_> {
     /// Returns a reference over the normalized lemma.
     pub fn lemma(&self) -> &str {
         self.lemma.as_ref()
+    }
+
+    /// Набранная форма слова, если лемматизатор заменил лемму.
+    ///
+    /// Индекс, устроенный вокруг «в индексе то, что написано», кладёт её рядом
+    /// с леммой: одна отвечает за набор по буквам, исключение слова и точное
+    /// совпадение, другая — за поиск по любой форме.
+    pub fn surface(&self) -> Option<&str> {
+        self.surface.as_deref()
     }
 
     /// Returns the length in bytes of the normalized lemma.
@@ -200,6 +216,7 @@ impl Arbitrary for Token<'static> {
             char_map: None,
             script: Script::arbitrary(g),
             language: Option::arbitrary(g),
+            surface: None,
         }
     }
 }

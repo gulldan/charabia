@@ -568,6 +568,93 @@ mod test {
         );
     }
 
+    /// Словарь, который сам приводит ключ к общему виду — как и настоящий:
+    /// конвейер отдаёт ему слово разложенным (NFKD) и в исходном регистре.
+    #[derive(Debug)]
+    struct Surfaces;
+
+    impl Surfaces {
+        fn key(word: &str) -> String {
+            word.to_lowercase()
+                .chars()
+                .filter(|character| !matches!(character, '\u{300}'..='\u{36f}'))
+                .collect()
+        }
+    }
+
+    impl crate::normalizer::Lemmatizer for Surfaces {
+        fn lemma<'o>(
+            &self,
+            word: &'o str,
+            language: Option<Language>,
+            _sentence_initial: bool,
+        ) -> Option<Cow<'o, str>> {
+            // Лемму словарь отдаёт собранной и в своём регистре — в том виде,
+            // в каком она у него записана.
+            match (language?, Self::key(word).as_str()) {
+                (Language::Deu, "hausern") => Some(Cow::Borrowed("Häuser")),
+                (Language::Deu, "haus") => Some(Cow::Borrowed("HAUS")),
+                (Language::Rus, "елки") => Some(Cow::Borrowed("ёлка")),
+                _ => None,
+            }
+        }
+
+        fn resolve(
+            &self,
+            word: &str,
+            candidates: &[Language],
+            sentence_initial: bool,
+        ) -> Option<Language> {
+            candidates
+                .iter()
+                .copied()
+                .filter(|language| self.lemma(word, Some(*language), sentence_initial).is_some())
+                .min()
+        }
+    }
+
+    /// Обе формы каждого слова: лемма и, если словарь заменил слово, набранное.
+    fn forms(text: &str, allow_list: &[Language]) -> Vec<(String, Option<String>)> {
+        let mut builder = TokenizerBuilder::default();
+        builder.lemmatizer(&Surfaces).allow_list(allow_list);
+        let tokenizer = builder.build();
+        tokenizer
+            .tokenize(text)
+            .filter(|token| token.is_word())
+            .map(|token| (token.lemma().to_string(), token.surface().map(str::to_string)))
+            .collect()
+    }
+
+    #[test]
+    fn the_written_word_stays_next_to_its_lemma() {
+        // Набранное никуда не девается и лоссовые шаги проходит наравне с
+        // леммой: диакритика снята у обеих, регистр опущен у обеих.
+        assert_eq!(
+            forms("Häusern", &[Language::Deu]),
+            vec![("hauser".to_string(), Some("hausern".to_string()))]
+        );
+    }
+
+    #[test]
+    fn a_word_the_dictionary_only_recased_keeps_one_form() {
+        // Словарь слово изменил, а нормализация свела формы обратно — вторую
+        // хранить незачем.
+        assert_eq!(forms("Haus", &[Language::Deu]), vec![("haus".to_string(), None)]);
+    }
+
+    #[test]
+    fn both_forms_come_out_decomposed_the_same_way() {
+        // Кириллице надстрочный знак не снимают, поэтому «ё» остаётся парой
+        // символов — но одинаково у обеих форм, иначе набор по буквам не дошёл
+        // бы от одной до другой.
+        let forms = forms("Ёлки", &[Language::Rus]);
+        let (lemma, surface) = forms.first().unwrap();
+        let surface = surface.as_deref().unwrap();
+        assert_eq!(lemma, "е\u{308}лка");
+        assert_eq!(surface, "е\u{308}лки");
+        assert!(surface.starts_with("е\u{308}л"));
+    }
+
     #[test]
     fn without_locales_nothing_is_asked_of_the_dictionary() {
         // Без allow_list латиница остаётся без языка, а кириллица получает то,

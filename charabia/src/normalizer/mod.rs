@@ -191,7 +191,10 @@ fn lemmatize<'o>(
         token.char_map = Some(char_map);
     }
 
-    token.lemma = Cow::Owned(lemma);
+    // Набранная форма остаётся при токене. Индекс Meilisearch устроен вокруг
+    // «в индексе то, что написано»: по ней работают набор по буквам, точное
+    // совпадение и исключение слова, — а лемма кладётся сверху.
+    token.surface = Some(std::mem::replace(&mut token.lemma, Cow::Owned(lemma)));
 
     // Лемма приходит из словаря готовой строкой и потому не прошла шаги, через
     // которые уже прошёл сам токен. Без повторного разложения диакритика в ней
@@ -206,6 +209,45 @@ fn lemmatize<'o>(
 
     // Слово стало другим — про эту строку стоп-лист ещё не спрашивали.
     classify_lemma(token, options)
+}
+
+/// Прогоняет набранную форму теми же лоссовыми шагами, что и лемму.
+///
+/// Нелоссовые она уже прошла: конвейер выполняет их до лемматизации. Дальше
+/// две формы одного слова обязаны нормализоваться одинаково, иначе набранное
+/// легло бы в индекс в одной раскладке юникода, а лемма — в другой, и запрос
+/// не нашёл бы ни того, ни другого.
+fn normalize_surface<'o>(mut token: Token<'o>, options: &NormalizerOption) -> Token<'o> {
+    let Some(surface) = token.surface.take() else {
+        return token;
+    };
+    // Отдельный токен: `char_map` настоящего выровнена по лемме, трогать её
+    // нельзя, а набранной форме карта не нужна вовсе.
+    let options = NormalizerOption { create_char_map: false, ..options.clone() };
+    let mut shadow = Token {
+        kind: token.kind,
+        lemma: surface,
+        char_start: token.char_start,
+        char_end: token.char_end,
+        byte_start: token.byte_start,
+        byte_end: token.byte_end,
+        char_map: None,
+        script: token.script,
+        language: token.language,
+        surface: None,
+    };
+    if options.lossy {
+        for normalizer in LOSSY_NORMALIZERS.iter() {
+            if normalizer.should_normalize(&shadow) {
+                shadow = normalizer.normalize(shadow, &options);
+            }
+        }
+    }
+
+    // Словарь слово изменил, а нормализация свела формы обратно — вторую
+    // хранить нечего.
+    token.surface = (shadow.lemma != token.lemma).then_some(shadow.lemma);
+    token
 }
 
 /// Iterator over Normalized [`Token`]s.
@@ -411,7 +453,7 @@ impl<'o> Token<'o> {
             }
         }
 
-        self
+        normalize_surface(self, options)
     }
 }
 
