@@ -64,6 +64,14 @@ pub struct Token<'o> {
     /// number of bytes used in the original string mapped to the number of bytes used in the normalized string by each char in the original string.
     /// The char_map must be the same length as the number of chars in the original lemma.
     pub char_map: Option<Vec<(u8, u8)>>,
+    /// То же самое, но для набранной формы: символы оригинала — в байты
+    /// [`Token::surface`]. Есть ровно тогда, когда есть сама набранная форма и
+    /// карты вообще строятся.
+    ///
+    /// Левые столбцы обеих карт совпадают: это один и тот же оригинал,
+    /// разобранный по символам. Различаются правые — одна меряет лемму, другая
+    /// написанное.
+    pub surface_char_map: Option<Vec<(u8, u8)>>,
     /// script of the Token
     pub script: Script,
     /// language of the Token
@@ -153,38 +161,60 @@ impl Token<'_> {
     ///
     /// * `num_bytes` - number of bytes in normalized token
     pub fn original_lengths(&self, num_bytes: usize) -> (usize, usize) {
-        match &self.char_map {
-            None => {
-                // if we don't have a char_map, we look for the number of chars in the current
-                //   (probably normalized) string
-                self.lemma
-                    .char_indices()
-                    .take_while(|(byte_index, _)| *byte_index < num_bytes)
-                    .enumerate()
-                    .last()
-                    .map_or((0, 0), |(char_index, (byte_index, c))| {
-                        let char_count = char_index + 1;
-                        let byte_len = byte_index + c.len_utf8();
-                        (char_count, byte_len)
-                    })
-            }
-            Some(char_map) => {
-                let mut normalized_byte_len = 0;
-                let mut original_byte_len = 0;
-                let char_count = char_map
-                    .iter()
-                    .take_while(|(original_bytes_in_char, normalized_bytes_in_char)| {
-                        if normalized_byte_len < num_bytes {
-                            original_byte_len += *original_bytes_in_char as usize;
-                            normalized_byte_len += *normalized_bytes_in_char as usize;
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .count();
-                (char_count, original_byte_len)
-            }
+        lengths_in(self.char_map.as_deref(), self.lemma(), num_bytes)
+    }
+
+    /// То же, что [`Token::original_lengths`], но по набранной форме.
+    ///
+    /// Совпадение, пришедшее от написанного, меряется по написанному: в индексе
+    /// набранная форма лежит рядом с леммой, и её байты — это её байты, а не
+    /// байты леммы.
+    ///
+    /// # Arguments
+    ///
+    /// * `num_bytes` - number of bytes in the normalized surface form
+    pub fn surface_lengths(&self, num_bytes: usize) -> (usize, usize) {
+        lengths_in(
+            self.surface_char_map.as_deref(),
+            self.surface().unwrap_or_else(|| self.lemma()),
+            num_bytes,
+        )
+    }
+}
+
+/// Сколько символов и байтов оригинала стоит за первыми `num_bytes` байтами
+/// нормализованной строки.
+///
+/// Без карты считать нечего, кроме самой строки: символ засчитывается целиком,
+/// даже если байты покрыли его наполовину.
+fn lengths_in(char_map: Option<&[(u8, u8)]>, normalized: &str, num_bytes: usize) -> (usize, usize) {
+    match char_map {
+        None => normalized
+            .char_indices()
+            .take_while(|(byte_index, _)| *byte_index < num_bytes)
+            .enumerate()
+            .last()
+            .map_or((0, 0), |(char_index, (byte_index, c))| {
+                let char_count = char_index + 1;
+                let byte_len = byte_index + c.len_utf8();
+                (char_count, byte_len)
+            }),
+        Some(char_map) => {
+            let mut normalized_byte_len = 0;
+            let mut original_byte_len = 0;
+            let char_count = char_map
+                .iter()
+                .take_while(|(original_bytes_in_char, normalized_bytes_in_char)| {
+                    if normalized_byte_len < num_bytes {
+                        original_byte_len += *original_bytes_in_char as usize;
+                        normalized_byte_len += *normalized_bytes_in_char as usize;
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .count();
+            (char_count, original_byte_len)
         }
     }
 }
@@ -214,6 +244,7 @@ impl Arbitrary for Token<'static> {
             byte_start,
             byte_end,
             char_map: None,
+            surface_char_map: None,
             script: Script::arbitrary(g),
             language: Option::arbitrary(g),
             surface: None,

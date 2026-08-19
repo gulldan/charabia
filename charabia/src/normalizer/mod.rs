@@ -136,9 +136,13 @@ pub trait Lemmatizer: Sync + Send + std::fmt::Debug {
 /// Replaces the token lemma, keeping `char_map` aligned with the original text.
 ///
 /// The map keeps one entry per original character, because the highlighter
-/// counts entries to know how many characters a match spans; the bytes of the
-/// lemma all go to the last entry, so a match on the lemma opens back into the
-/// whole original word.
+/// counts entries to know how many characters a match spans.
+///
+/// Здесь карта леммы получается черновой: все её байты уходят в последнюю
+/// запись. Разложить их по символам можно только тогда, когда обе формы пройдут
+/// нормализацию до конца, — этим занимается [`normalize_surface`]. А карта
+/// написанной формы откладывается сюда же, чтобы пройти те же лоссовые шаги,
+/// что и лемма.
 ///
 /// Получившаяся лемма ещё раз сверяется со стоп-листом: классификатор видел
 /// только словоформу.
@@ -180,15 +184,27 @@ fn lemmatize<'o>(
         if lemma.len() > u8::MAX as usize {
             return token;
         }
-        let mut char_map: Vec<(u8, u8)> = match token.char_map.take() {
-            Some(map) => map.into_iter().map(|(origin, _)| (origin, 0)).collect(),
-            None => token.lemma().chars().map(|c| (c.len_utf8() as u8, 0)).collect(),
+        // До лемматизации `char_map` отображает символы оригинала в байты
+        // написанной формы — она сейчас и лежит в лемме. Карты нет, когда ни
+        // один нормализатор слово не тронул: тогда формы совпадают побайтно.
+        let surface_map: Vec<(u8, u8)> = match &token.char_map {
+            Some(map) => map.clone(),
+            None => token
+                .lemma()
+                .chars()
+                .map(|c| {
+                    let len = c.len_utf8() as u8;
+                    (len, len)
+                })
+                .collect(),
         };
-        match char_map.last_mut() {
-            Some(last) => last.1 = lemma.len() as u8,
-            None => return token,
-        }
+        let Some((&(last_origin, _), head)) = surface_map.split_last() else {
+            return token;
+        };
+        let mut char_map: Vec<(u8, u8)> = head.iter().map(|&(origin, _)| (origin, 0)).collect();
+        char_map.push((last_origin, lemma.len() as u8));
         token.char_map = Some(char_map);
+        token.surface_char_map = Some(surface_map);
     }
 
     // Набранная форма остаётся при токене. Индекс Meilisearch устроен вокруг
@@ -211,7 +227,8 @@ fn lemmatize<'o>(
     classify_lemma(token, options)
 }
 
-/// Прогоняет набранную форму теми же лоссовыми шагами, что и лемму.
+/// Прогоняет набранную форму теми же лоссовыми шагами, что и лемму, и по её
+/// итогу раскладывает карту леммы.
 ///
 /// Нелоссовые она уже прошла: конвейер выполняет их до лемматизации. Дальше
 /// две формы одного слова обязаны нормализоваться одинаково, иначе набранное
@@ -221,9 +238,8 @@ fn normalize_surface<'o>(mut token: Token<'o>, options: &NormalizerOption) -> To
     let Some(surface) = token.surface.take() else {
         return token;
     };
-    // Отдельный токен: `char_map` настоящего выровнена по лемме, трогать её
-    // нельзя, а набранной форме карта не нужна вовсе.
-    let options = NormalizerOption { create_char_map: false, ..options.clone() };
+    // Отдельный токен: у него своя карта — написанной формы, — и лоссовые
+    // нормализаторы ведут её ровно так же, как карту леммы.
     let mut shadow = Token {
         kind: token.kind,
         lemma: surface,
@@ -231,7 +247,8 @@ fn normalize_surface<'o>(mut token: Token<'o>, options: &NormalizerOption) -> To
         char_end: token.char_end,
         byte_start: token.byte_start,
         byte_end: token.byte_end,
-        char_map: None,
+        char_map: token.surface_char_map.take(),
+        surface_char_map: None,
         script: token.script,
         language: token.language,
         surface: None,
@@ -239,15 +256,70 @@ fn normalize_surface<'o>(mut token: Token<'o>, options: &NormalizerOption) -> To
     if options.lossy {
         for normalizer in LOSSY_NORMALIZERS.iter() {
             if normalizer.should_normalize(&shadow) {
-                shadow = normalizer.normalize(shadow, &options);
+                shadow = normalizer.normalize(shadow, options);
             }
+        }
+    }
+
+    // Только теперь обе формы доведены до одного вида и общую часть у них
+    // видно: до лоссовых шагов «Мама» и «мама» расходятся первой же буквой.
+    if let Some(surface_map) = shadow.char_map.as_deref() {
+        if let Some(char_map) = align_char_map(surface_map, shadow.lemma(), token.lemma()) {
+            token.char_map = Some(char_map);
         }
     }
 
     // Словарь слово изменил, а нормализация свела формы обратно — вторую
     // хранить нечего.
-    token.surface = (shadow.lemma != token.lemma).then_some(shadow.lemma);
+    if shadow.lemma == token.lemma {
+        token.surface = None;
+        token.surface_char_map = None;
+    } else {
+        token.surface = Some(shadow.lemma);
+        token.surface_char_map = shadow.char_map;
+    }
     token
+}
+
+/// Раскладывает байты леммы по символам оригинала.
+///
+/// Общий начальный участок написанного и леммы отображается посимвольно: набор
+/// по буквам подсвечивает ровно набранное, а не слово целиком. Всё, что за ним,
+/// сваливается в последнюю запись — совпадение, дошедшее до расходящегося
+/// хвоста леммы, открывается на слово целиком, и это правильно: в тексте такой
+/// границы нет.
+///
+/// `surface_map` — карта написанной формы, `surface` — она сама, обе уже
+/// нормализованы до конца. `None` означает «разложить не вышло»: карта пустая
+/// или лемма не лезет в счётчик байтов.
+fn align_char_map(surface_map: &[(u8, u8)], surface: &str, lemma: &str) -> Option<Vec<(u8, u8)>> {
+    if lemma.len() > u8::MAX as usize {
+        return None;
+    }
+
+    let mut char_map: Vec<(u8, u8)> = Vec::with_capacity(surface_map.len());
+    let mut matched = 0;
+    let mut split = surface_map.len();
+    for (index, &(origin, normalized)) in surface_map.iter().enumerate() {
+        let end = matched + normalized as usize;
+        if end <= lemma.len()
+            && end <= surface.len()
+            && surface.as_bytes()[matched..end] == lemma.as_bytes()[matched..end]
+        {
+            char_map.push((origin, normalized));
+            matched = end;
+        } else {
+            split = index;
+            break;
+        }
+    }
+    for &(origin, _) in &surface_map[split..] {
+        char_map.push((origin, 0));
+    }
+
+    let last = char_map.last_mut()?;
+    last.1 = last.1.checked_add(u8::try_from(lemma.len() - matched).ok()?)?;
+    Some(char_map)
 }
 
 /// Iterator over Normalized [`Token`]s.

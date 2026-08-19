@@ -416,7 +416,7 @@ mod test {
     use fst::Set;
     use quickcheck::quickcheck;
 
-    use crate::{Language, Tokenize, TokenizerBuilder};
+    use crate::{Language, Token, Tokenize, TokenizerBuilder};
 
     #[test]
     fn check_lifetimes() {
@@ -653,6 +653,65 @@ mod test {
         assert_eq!(lemma, "е\u{308}лка");
         assert_eq!(surface, "е\u{308}лки");
         assert!(surface.starts_with("е\u{308}л"));
+    }
+
+    /// Слова текста вместе с картами символов — так их видит подсветка.
+    fn mapped<'o>(text: &'o str, allow_list: &[Language]) -> Vec<Token<'o>> {
+        let mut builder = TokenizerBuilder::default();
+        builder.lemmatizer(&Surfaces).allow_list(allow_list).create_char_map(true);
+        let tokenizer = builder.build();
+        tokenizer.tokenize(text).filter(|token| token.is_word()).collect()
+    }
+
+    #[test]
+    fn the_part_the_two_forms_share_is_laid_out_char_by_char() {
+        // «Häusern» и «hauser» совпадают до последней буквы написанного, и эта
+        // общая часть разложена по символам: набранная буква меряется буквой, а
+        // не всем словом.
+        let tokens = mapped("Häusern", &[Language::Deu]);
+        let token = tokens.first().unwrap();
+        assert_eq!(token.lemma(), "hauser");
+        assert_eq!(token.surface(), Some("hausern"));
+        assert_eq!(token.original_lengths(1), (1, 1));
+        assert_eq!(token.original_lengths(4), (4, 5));
+        assert_eq!(token.surface_lengths(2), (2, 3));
+        assert_eq!(token.surface_lengths(7), (7, 8));
+    }
+
+    #[test]
+    fn a_match_reaching_the_diverging_tail_opens_the_whole_word() {
+        // «ёлки» и «ёлка» расходятся последней буквой. Совпадение, дошедшее до
+        // неё, подсвечивает слово целиком: такой границы в тексте нет.
+        let tokens = mapped("Ёлки", &[Language::Rus]);
+        let token = tokens.first().unwrap();
+        assert_eq!(token.lemma(), "е\u{308}лка");
+        assert_eq!(token.original_lengths(4), (1, 2));
+        assert_eq!(token.original_lengths(10), (4, 8));
+        assert_eq!(token.surface_lengths(8), (3, 6));
+    }
+
+    #[test]
+    fn a_word_the_dictionary_only_recased_still_lays_out_char_by_char() {
+        // Второй формы не осталось, а карта всё равно посимвольная: регистр
+        // формы не разводит, и «Haus» на запрос «h» подсвечивает одну букву.
+        let tokens = mapped("Haus", &[Language::Deu]);
+        let token = tokens.first().unwrap();
+        assert_eq!(token.lemma(), "haus");
+        assert_eq!(token.surface(), None);
+        assert_eq!(token.surface_char_map, None);
+        assert_eq!(token.original_lengths(1), (1, 1));
+        assert_eq!(token.original_lengths(4), (4, 4));
+    }
+
+    #[test]
+    fn a_word_the_dictionary_left_alone_keeps_the_map_it_had() {
+        // Словарь слово не менял — второй карты нет вовсе, и меряется всё ровно
+        // так же, как без лемматизатора.
+        let tokens = mapped("Fenster", &[Language::Deu]);
+        let token = tokens.first().unwrap();
+        assert_eq!(token.surface(), None);
+        assert_eq!(token.surface_char_map, None);
+        assert_eq!(token.original_lengths(3), (3, 3));
     }
 
     #[test]
